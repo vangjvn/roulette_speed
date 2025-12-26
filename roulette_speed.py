@@ -1,6 +1,6 @@
 """
-Roulette Speed Detector v6.2 - Windows Edition
-热键: Ctrl+0 设置检测点
+Roulette Speed Detector v6.3 - Windows Edition
+修复热键问题 + 可自定义热键
 """
 
 import sys
@@ -14,7 +14,8 @@ from mss import mss
 from pynput import keyboard
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QGroupBox, QSpinBox
+    QPushButton, QLabel, QFrame, QGroupBox, QSpinBox, QComboBox,
+    QMessageBox
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QCursor, QPainter, QColor, QPen
@@ -22,12 +23,9 @@ from PyQt5.QtGui import QCursor, QPainter, QColor, QPen
 
 # ==================== Config ====================
 def get_config_path():
-    """获取配置文件路径（支持打包后的exe）"""
     if getattr(sys, 'frozen', False):
-        # 打包后的exe
         base_path = os.path.dirname(sys.executable)
     else:
-        # 开发环境
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, "roulette_config.json")
 
@@ -41,6 +39,7 @@ DEFAULT_CONFIG = {
     "warmup_count": 5,
     "slots_to_count": 6,
     "min_peak_interval": 0.04,
+    "hotkey": "1",  # 默认热键: Ctrl+1
 }
 
 
@@ -228,14 +227,14 @@ class DetectorThread(QThread):
 
                 if self.warmup_peaks < warmup_needed:
                     self.warmup_peaks += 1
-                    self.status.emit(f"⏳ Warmup {self.warmup_peaks}/{warmup_needed}")
+                    self.status.emit(f"Warmup {self.warmup_peaks}/{warmup_needed}")
                     self.debug.emit(f"[Warmup] Peak {self.warmup_peaks}/{warmup_needed}")
                 else:
                     self.counting_peaks += 1
                     self.peak_times.append(now)
 
                     points_needed = slots_needed + 1
-                    self.status.emit(f"🔶 Counting {self.counting_peaks}/{points_needed}")
+                    self.status.emit(f"Counting {self.counting_peaks}/{points_needed}")
                     self.debug.emit(f"[Count] Peak {self.counting_peaks}/{points_needed}, B={current_b:.1f}")
 
                     if self.counting_peaks >= points_needed:
@@ -264,68 +263,122 @@ class DetectorThread(QThread):
     def start_measure(self):
         self.reset()
         self.measuring = True
-        self.status.emit("⏳ Waiting for wheel to spin...")
+        self.status.emit("Waiting for wheel to spin...")
 
     def stop_measure(self):
         self.measuring = False
-        self.status.emit("✓ Done")
+        self.status.emit("Done")
 
     def stop(self):
         self.running = False
         self.wait()
 
 
-# ==================== Hotkey (Windows: Ctrl+0) ====================
+# ==================== Hotkey Handler ====================
+# Windows Virtual Key Codes
+VK_CODES = {
+    '0': 48, '1': 49, '2': 50, '3': 51, '4': 52,
+    '5': 53, '6': 54, '7': 55, '8': 56, '9': 57,
+    'A': 65, 'B': 66, 'C': 67, 'D': 68, 'E': 69,
+    'F': 70, 'G': 71, 'H': 72, 'I': 73, 'J': 74,
+    'K': 75, 'L': 76, 'M': 77, 'N': 78, 'O': 79,
+    'P': 80, 'Q': 81, 'R': 82, 'S': 83, 'T': 84,
+    'U': 85, 'V': 86, 'W': 87, 'X': 88, 'Y': 89, 'Z': 90,
+}
+
+
 class HotkeySignals(QObject):
     pressed = pyqtSignal(str)
+    debug = pyqtSignal(str)
 
 
 class Hotkeys:
-    def __init__(self, signals):
+    def __init__(self, signals, target_key='1'):
         self.signals = signals
-        self.pressed = set()
-        self.last = 0
-        self.listener = keyboard.Listener(on_press=self._press, on_release=self._release)
-        self.listener.start()
+        self.target_key = target_key.upper()
+        self.ctrl_pressed = False
+        self.last_trigger = 0
+        self.listener = None
+        self.start_listener()
 
-    def _press(self, key):
-        self.pressed.add(key)
-        now = time.time()
-        if now - self.last < 0.3:
-            return
+    def start_listener(self):
+        try:
+            self.listener = keyboard.Listener(
+                on_press=self._on_press,
+                on_release=self._on_release
+            )
+            self.listener.start()
+            self.signals.debug.emit(f"Hotkey listener started: Ctrl+{self.target_key}")
+        except Exception as e:
+            self.signals.debug.emit(f"Hotkey listener error: {e}")
 
-        # Windows: Ctrl键
-        ctrl = any(k in self.pressed for k in
-                   [keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r])
-        if not ctrl:
-            return
+    def set_target_key(self, key):
+        self.target_key = key.upper()
+        self.signals.debug.emit(f"Hotkey changed to: Ctrl+{self.target_key}")
 
-        # 检测 Ctrl+0
-        for k in list(self.pressed):
-            try:
-                if hasattr(k, 'char') and k.char == '0':
-                    self.last = now
-                    self.signals.pressed.emit('set_point')
-                    self.pressed.clear()
-                    return
-            except:
-                pass
+    def _on_press(self, key):
+        try:
+            # 检测 Ctrl 键
+            if key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+                self.ctrl_pressed = True
+                return
 
-            # 也支持小键盘的0
-            try:
-                if hasattr(k, 'vk') and k.vk == 96:  # Numpad 0
-                    self.last = now
-                    self.signals.pressed.emit('set_point')
-                    self.pressed.clear()
-                    return
-            except:
-                pass
+            if not self.ctrl_pressed:
+                return
 
-    def _release(self, key):
-        self.pressed.discard(key)
+            # 防抖
+            now = time.time()
+            if now - self.last_trigger < 0.3:
+                return
+
+            # 获取按下的键
+            pressed_key = None
+
+            # 方法1: 检查 char 属性
+            if hasattr(key, 'char') and key.char:
+                pressed_key = key.char.upper()
+
+            # 方法2: 检查 vk 属性 (Virtual Key Code)
+            if pressed_key is None and hasattr(key, 'vk') and key.vk:
+                vk = key.vk
+                for k, v in VK_CODES.items():
+                    if v == vk:
+                        pressed_key = k
+                        break
+                # 小键盘数字 (96-105 对应 0-9)
+                if vk >= 96 and vk <= 105:
+                    pressed_key = str(vk - 96)
+
+            # 方法3: 从 key 的字符串表示中提取
+            if pressed_key is None:
+                key_str = str(key)
+                if key_str.startswith("'") and key_str.endswith("'"):
+                    pressed_key = key_str[1:-1].upper()
+                elif 'Key.' not in key_str:
+                    pressed_key = key_str.upper()
+
+            # 检查是否匹配目标键
+            if pressed_key and pressed_key == self.target_key:
+                self.last_trigger = now
+                self.signals.pressed.emit('set_point')
+                self.signals.debug.emit(f"Hotkey triggered: Ctrl+{pressed_key}")
+
+        except Exception as e:
+            self.signals.debug.emit(f"Key press error: {e}")
+
+    def _on_release(self, key):
+        try:
+            if key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+                self.ctrl_pressed = False
+        except:
+            pass
 
     def stop(self):
-        self.listener.stop()
+        if self.listener:
+            try:
+                self.listener.stop()
+            except:
+                pass
 
 
 # ==================== Main Window ====================
@@ -335,10 +388,13 @@ class MainWindow(QMainWindow):
         self.config = load_config()
         self.history = []
 
+        # Hotkey
         self.hk_signals = HotkeySignals()
         self.hk_signals.pressed.connect(self.on_hotkey)
-        self.hotkeys = Hotkeys(self.hk_signals)
+        self.hk_signals.debug.connect(self.on_hotkey_debug)
+        self.hotkeys = Hotkeys(self.hk_signals, self.config.get("hotkey", "1"))
 
+        # Detector
         self.detector = DetectorThread(self.config)
         self.detector.status.connect(self.on_status)
         self.detector.result.connect(self.on_result)
@@ -348,58 +404,85 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
 
+        # Mouse timer
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_mouse)
         self.timer.start(50)
 
     def init_ui(self):
-        self.setWindowTitle("Roulette Speed v6.2")
-        self.setFixedSize(380, 850)
+        self.setWindowTitle("Roulette Speed v6.3")
+        self.setFixedSize(400, 900)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
 
         w = QWidget()
         self.setCentralWidget(w)
         layout = QVBoxLayout(w)
-        layout.setSpacing(2)
+        layout.setSpacing(4)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        title = QLabel("🎰 Roulette Speed Detector v6.2")
+        # Title
+        title = QLabel("Roulette Speed Detector v6.3")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 15px; font-weight: bold; color: #2196F3;")
         layout.addWidget(title)
 
+        # Mouse info
         info = QFrame()
         info.setStyleSheet("background: #e3f2fd; border-radius: 6px;")
         info_layout = QVBoxLayout(info)
         info_layout.setContentsMargins(8, 6, 8, 6)
-        info_layout.setSpacing(1)
+        info_layout.setSpacing(2)
 
         self.mouse_label = QLabel("Mouse: (0, 0)")
         self.mouse_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #1565c0;")
         info_layout.addWidget(self.mouse_label)
 
-        # 热键提示改为 Ctrl+0
-        hint = QLabel("Hotkey: Ctrl+0 to set detection point")
-        hint.setStyleSheet("font-size: 10px; color: #666;")
-        info_layout.addWidget(hint)
-
         layout.addWidget(info)
 
-        point_group = QGroupBox("📍 Detection Point")
+        # Detection Point Group
+        point_group = QGroupBox("Detection Point")
         point_layout = QVBoxLayout()
-        point_layout.setSpacing(1)
+        point_layout.setSpacing(4)
 
         self.point_label = QLabel(f"({self.config['detect_point']['x']}, {self.config['detect_point']['y']})")
         self.point_label.setAlignment(Qt.AlignCenter)
         self.point_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #333;")
         point_layout.addWidget(self.point_label)
 
+        # Hotkey row
+        hotkey_row = QHBoxLayout()
+        hotkey_row.addWidget(QLabel("Hotkey: Ctrl +"))
+        self.hotkey_combo = QComboBox()
+        self.hotkey_combo.addItems(['1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
+                                    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'])
+        current_hotkey = self.config.get("hotkey", "1")
+        idx = self.hotkey_combo.findText(current_hotkey.upper())
+        if idx >= 0:
+            self.hotkey_combo.setCurrentIndex(idx)
+        self.hotkey_combo.currentTextChanged.connect(self.on_hotkey_change)
+        hotkey_row.addWidget(self.hotkey_combo)
+
+        # Set Point button (备用方案)
+        self.set_point_btn = QPushButton("Set Point Now")
+        self.set_point_btn.setStyleSheet("""
+            QPushButton {
+                background: #2196F3; color: white;
+                font-size: 12px; font-weight: bold;
+                padding: 8px; border-radius: 4px;
+            }
+            QPushButton:hover { background: #1976D2; }
+        """)
+        self.set_point_btn.clicked.connect(self.set_point_now)
+        hotkey_row.addWidget(self.set_point_btn)
+
+        point_layout.addLayout(hotkey_row)
         point_group.setLayout(point_layout)
         layout.addWidget(point_group)
 
-        param_group = QGroupBox("⚙️ Parameters")
+        # Parameters
+        param_group = QGroupBox("Parameters")
         param_layout = QVBoxLayout()
-        param_layout.setSpacing(1)
+        param_layout.setSpacing(4)
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Sample Size (NxN):"))
@@ -449,7 +532,8 @@ class MainWindow(QMainWindow):
         param_group.setLayout(param_layout)
         layout.addWidget(param_group)
 
-        graph_group = QGroupBox("📊 Brightness (green=current, red=avg, yellow=peak)")
+        # Brightness graph
+        graph_group = QGroupBox("Brightness (green=current, red=avg, yellow=peak)")
         graph_layout = QVBoxLayout()
 
         self.graph = BrightnessGraph()
@@ -463,6 +547,7 @@ class MainWindow(QMainWindow):
         graph_group.setLayout(graph_layout)
         layout.addWidget(graph_group)
 
+        # Status
         self.status_label = QLabel("Ready - Press START before wheel spins")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setFixedHeight(40)
@@ -473,7 +558,8 @@ class MainWindow(QMainWindow):
         """)
         layout.addWidget(self.status_label)
 
-        result_group = QGroupBox("🎯 Result")
+        # Result
+        result_group = QGroupBox("Result")
         result_layout = QVBoxLayout()
 
         self.velocity_label = QLabel("-- deg/s")
@@ -493,7 +579,8 @@ class MainWindow(QMainWindow):
         result_group.setLayout(result_layout)
         layout.addWidget(result_group)
 
-        history_group = QGroupBox("📜 History (Last 6)")
+        # History
+        history_group = QGroupBox("History (Last 6)")
         history_layout = QVBoxLayout()
 
         self.history_label = QLabel("No records")
@@ -509,16 +596,19 @@ class MainWindow(QMainWindow):
         history_group.setLayout(history_layout)
         layout.addWidget(history_group)
 
-        self.debug_label = QLabel("")
-        self.debug_label.setFixedHeight(35)
+        # Debug
+        self.debug_label = QLabel("Debug: Ready")
+        self.debug_label.setFixedHeight(40)
+        self.debug_label.setWordWrap(True)
         self.debug_label.setStyleSheet("""
             font-size: 9px; font-family: monospace;
-            background: #0a0a0a; color: #666;
+            background: #0a0a0a; color: #888;
             padding: 4px; border-radius: 4px;
         """)
         layout.addWidget(self.debug_label)
 
-        self.start_btn = QPushButton("▶ START")
+        # START button
+        self.start_btn = QPushButton("START")
         self.start_btn.setFixedHeight(50)
         self.start_btn.setStyleSheet("""
             QPushButton {
@@ -530,6 +620,27 @@ class MainWindow(QMainWindow):
         """)
         self.start_btn.clicked.connect(self.toggle)
         layout.addWidget(self.start_btn)
+
+    def set_point_now(self):
+        """按钮方式设置检测点"""
+        pos = QCursor.pos()
+        self.config["detect_point"]["x"] = pos.x()
+        self.config["detect_point"]["y"] = pos.y()
+        self.detector.config["detect_point"]["x"] = pos.x()
+        self.detector.config["detect_point"]["y"] = pos.y()
+        save_config(self.config)
+        self.point_label.setText(f"({pos.x()}, {pos.y()})")
+        self.status_label.setText(f"Point set: ({pos.x()}, {pos.y()})")
+        self.debug_label.setText(f"Detection point set via button: ({pos.x()}, {pos.y()})")
+
+    def on_hotkey_change(self, key):
+        self.config["hotkey"] = key
+        self.hotkeys.set_target_key(key)
+        save_config(self.config)
+
+    def on_hotkey_debug(self, msg):
+        self.debug_label.setText(f"Hotkey: {msg}")
+        print(f"[Hotkey] {msg}")
 
     def on_size_change(self, v):
         self.config["sample_size"] = v
@@ -569,7 +680,7 @@ class MainWindow(QMainWindow):
             self.detector.config["detect_point"]["y"] = pos.y()
             save_config(self.config)
             self.point_label.setText(f"({pos.x()}, {pos.y()})")
-            self.status_label.setText(f"✓ Point set: ({pos.x()}, {pos.y()})")
+            self.status_label.setText(f"Point set: ({pos.x()}, {pos.y()})")
 
     def on_status(self, text):
         self.status_label.setText(text)
@@ -599,7 +710,7 @@ class MainWindow(QMainWindow):
         self.history = self.history[:6]
         self.history_label.setText("\n".join(self.history))
 
-        self.start_btn.setText("▶ START")
+        self.start_btn.setText("START")
         self.start_btn.setStyleSheet("""
             QPushButton {
                 background: #4CAF50; color: white;
@@ -621,7 +732,7 @@ class MainWindow(QMainWindow):
     def toggle(self):
         if not self.detector.measuring:
             self.detector.start_measure()
-            self.start_btn.setText("■ STOP")
+            self.start_btn.setText("STOP")
             self.start_btn.setStyleSheet("""
                 QPushButton {
                     background: #f44336; color: white;
@@ -632,7 +743,7 @@ class MainWindow(QMainWindow):
             """)
         else:
             self.detector.stop_measure()
-            self.start_btn.setText("▶ START")
+            self.start_btn.setText("START")
             self.start_btn.setStyleSheet("""
                 QPushButton {
                     background: #4CAF50; color: white;
@@ -653,10 +764,10 @@ def main():
     app.setStyle('Fusion')
 
     print("=" * 50)
-    print("  Roulette Speed Detector v6.2 - Windows")
+    print("  Roulette Speed Detector v6.3 - Windows")
     print("=" * 50)
-    print("  Hotkey: Ctrl+0 to set detection point")
-    print("  Click START before wheel spins")
+    print("  Default Hotkey: Ctrl+1")
+    print("  Or use 'Set Point Now' button")
     print("=" * 50)
 
     win = MainWindow()
