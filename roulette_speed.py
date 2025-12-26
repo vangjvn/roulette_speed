@@ -801,7 +801,11 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    # Windows 管理员权限检查
+    # 必须先创建 QApplication
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+
+    # 然后再检查管理员权限
     if sys.platform == 'win32' and not is_admin():
         reply = QMessageBox.question(
             None,
@@ -813,10 +817,6 @@ def main():
         if reply == QMessageBox.Yes:
             run_as_admin()
             return
-        # 用户选择不提权，继续运行但热键可能不工作
-
-    app = QApplication(sys.argv)
-    app.setStyle('Fusion')
 
     print("=" * 50)
     print("  Roulette Speed Detector v6.3 - Windows Fixed")
