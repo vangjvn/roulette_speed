@@ -1,12 +1,14 @@
 """
-Roulette Speed Detector v6.3 - Windows Edition
-修复热键问题 + 可自定义热键
+Roulette Speed Detector v6.3 - Windows Fixed
+热键: Ctrl+1 (可在配置文件中修改)
+需要管理员权限运行
 """
 
 import sys
 import json
 import time
 import os
+import ctypes
 from collections import deque
 import numpy as np
 import cv2
@@ -14,11 +16,40 @@ from mss import mss
 from pynput import keyboard
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QGroupBox, QSpinBox, QComboBox,
-    QMessageBox
+    QPushButton, QLabel, QFrame, QGroupBox, QSpinBox, QMessageBox
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QCursor, QPainter, QColor, QPen
+
+
+# ==================== 管理员权限检查 ====================
+def is_admin():
+    """检查是否以管理员权限运行"""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+
+def run_as_admin():
+    """请求管理员权限重新运行"""
+    if sys.platform == 'win32':
+        try:
+            if getattr(sys, 'frozen', False):
+                # 打包后的exe
+                executable = sys.executable
+            else:
+                # 开发环境
+                executable = sys.executable
+
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", executable, " ".join(sys.argv), None, 1
+            )
+            sys.exit(0)
+        except Exception as e:
+            print(f"Failed to elevate: {e}")
+            return False
+    return False
 
 
 # ==================== Config ====================
@@ -39,7 +70,7 @@ DEFAULT_CONFIG = {
     "warmup_count": 5,
     "slots_to_count": 6,
     "min_peak_interval": 0.04,
-    "hotkey": "1",  # 默认热键: Ctrl+1
+    "hotkey": "ctrl+1",  # 可自定义: ctrl+1, ctrl+2, ctrl+0, alt+1, etc.
 }
 
 
@@ -227,14 +258,14 @@ class DetectorThread(QThread):
 
                 if self.warmup_peaks < warmup_needed:
                     self.warmup_peaks += 1
-                    self.status.emit(f"Warmup {self.warmup_peaks}/{warmup_needed}")
+                    self.status.emit(f"⏳ Warmup {self.warmup_peaks}/{warmup_needed}")
                     self.debug.emit(f"[Warmup] Peak {self.warmup_peaks}/{warmup_needed}")
                 else:
                     self.counting_peaks += 1
                     self.peak_times.append(now)
 
                     points_needed = slots_needed + 1
-                    self.status.emit(f"Counting {self.counting_peaks}/{points_needed}")
+                    self.status.emit(f"🔶 Counting {self.counting_peaks}/{points_needed}")
                     self.debug.emit(f"[Count] Peak {self.counting_peaks}/{points_needed}, B={current_b:.1f}")
 
                     if self.counting_peaks >= points_needed:
@@ -263,122 +294,151 @@ class DetectorThread(QThread):
     def start_measure(self):
         self.reset()
         self.measuring = True
-        self.status.emit("Waiting for wheel to spin...")
+        self.status.emit("⏳ Waiting for wheel to spin...")
 
     def stop_measure(self):
         self.measuring = False
-        self.status.emit("Done")
+        self.status.emit("✓ Done")
 
     def stop(self):
         self.running = False
         self.wait()
 
 
-# ==================== Hotkey Handler ====================
-# Windows Virtual Key Codes
-VK_CODES = {
-    '0': 48, '1': 49, '2': 50, '3': 51, '4': 52,
-    '5': 53, '6': 54, '7': 55, '8': 56, '9': 57,
-    'A': 65, 'B': 66, 'C': 67, 'D': 68, 'E': 69,
-    'F': 70, 'G': 71, 'H': 72, 'I': 73, 'J': 74,
-    'K': 75, 'L': 76, 'M': 77, 'N': 78, 'O': 79,
-    'P': 80, 'Q': 81, 'R': 82, 'S': 83, 'T': 84,
-    'U': 85, 'V': 86, 'W': 87, 'X': 88, 'Y': 89, 'Z': 90,
-}
-
-
+# ==================== Hotkey (Fixed for Windows) ====================
 class HotkeySignals(QObject):
     pressed = pyqtSignal(str)
     debug = pyqtSignal(str)
 
 
 class Hotkeys:
-    def __init__(self, signals, target_key='1'):
+    """
+    支持的热键格式: ctrl+1, ctrl+0, alt+1, shift+1, ctrl+alt+1
+    """
+
+    # Windows 虚拟键码映射
+    VK_MAP = {
+        '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
+        '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
+        'a': 0x41, 'b': 0x42, 'c': 0x43, 'd': 0x44, 'e': 0x45,
+        'f': 0x46, 'g': 0x47, 'h': 0x48, 'i': 0x49, 'j': 0x4A,
+    }
+
+    def __init__(self, signals, hotkey_str="ctrl+1"):
         self.signals = signals
-        self.target_key = target_key.upper()
-        self.ctrl_pressed = False
+        self.hotkey_str = hotkey_str.lower()
         self.last_trigger = 0
-        self.listener = None
-        self.start_listener()
 
-    def start_listener(self):
+        # 解析热键
+        self.parse_hotkey(hotkey_str)
+
+        # 当前按下的键
+        self.ctrl_pressed = False
+        self.alt_pressed = False
+        self.shift_pressed = False
+        self.target_key_pressed = False
+
+        # 启动监听器
+        self.listener = keyboard.Listener(
+            on_press=self._on_press,
+            on_release=self._on_release
+        )
+        self.listener.start()
+
+        self.signals.debug.emit(f"Hotkey initialized: {hotkey_str}")
+
+    def parse_hotkey(self, hotkey_str):
+        """解析热键字符串"""
+        parts = hotkey_str.lower().replace(' ', '').split('+')
+        self.need_ctrl = 'ctrl' in parts
+        self.need_alt = 'alt' in parts
+        self.need_shift = 'shift' in parts
+
+        # 找到目标键（非修饰键）
+        self.target_char = None
+        self.target_vk = None
+        for p in parts:
+            if p not in ['ctrl', 'alt', 'shift']:
+                self.target_char = p
+                self.target_vk = self.VK_MAP.get(p)
+                break
+
+    def _check_key_match(self, key):
+        """检查按键是否匹配目标键"""
+        # 方法1: 检查 vk (虚拟键码)
+        if hasattr(key, 'vk') and key.vk is not None:
+            if self.target_vk and key.vk == self.target_vk:
+                return True
+            # 小键盘数字
+            if self.target_char and self.target_char.isdigit():
+                numpad_vk = 0x60 + int(self.target_char)  # Numpad 0-9
+                if key.vk == numpad_vk:
+                    return True
+
+        # 方法2: 检查 char
+        if hasattr(key, 'char') and key.char is not None:
+            if key.char.lower() == self.target_char:
+                return True
+
+        # 方法3: 检查 KeyCode
         try:
-            self.listener = keyboard.Listener(
-                on_press=self._on_press,
-                on_release=self._on_release
-            )
-            self.listener.start()
-            self.signals.debug.emit(f"Hotkey listener started: Ctrl+{self.target_key}")
-        except Exception as e:
-            self.signals.debug.emit(f"Hotkey listener error: {e}")
-
-    def set_target_key(self, key):
-        self.target_key = key.upper()
-        self.signals.debug.emit(f"Hotkey changed to: Ctrl+{self.target_key}")
-
-    def _on_press(self, key):
-        try:
-            # 检测 Ctrl 键
-            if key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-                self.ctrl_pressed = True
-                return
-
-            if not self.ctrl_pressed:
-                return
-
-            # 防抖
-            now = time.time()
-            if now - self.last_trigger < 0.3:
-                return
-
-            # 获取按下的键
-            pressed_key = None
-
-            # 方法1: 检查 char 属性
-            if hasattr(key, 'char') and key.char:
-                pressed_key = key.char.upper()
-
-            # 方法2: 检查 vk 属性 (Virtual Key Code)
-            if pressed_key is None and hasattr(key, 'vk') and key.vk:
-                vk = key.vk
-                for k, v in VK_CODES.items():
-                    if v == vk:
-                        pressed_key = k
-                        break
-                # 小键盘数字 (96-105 对应 0-9)
-                if vk >= 96 and vk <= 105:
-                    pressed_key = str(vk - 96)
-
-            # 方法3: 从 key 的字符串表示中提取
-            if pressed_key is None:
-                key_str = str(key)
-                if key_str.startswith("'") and key_str.endswith("'"):
-                    pressed_key = key_str[1:-1].upper()
-                elif 'Key.' not in key_str:
-                    pressed_key = key_str.upper()
-
-            # 检查是否匹配目标键
-            if pressed_key and pressed_key == self.target_key:
-                self.last_trigger = now
-                self.signals.pressed.emit('set_point')
-                self.signals.debug.emit(f"Hotkey triggered: Ctrl+{pressed_key}")
-
-        except Exception as e:
-            self.signals.debug.emit(f"Key press error: {e}")
-
-    def _on_release(self, key):
-        try:
-            if key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-                self.ctrl_pressed = False
+            target_keycode = keyboard.KeyCode.from_char(self.target_char)
+            if key == target_keycode:
+                return True
         except:
             pass
 
+        return False
+
+    def _on_press(self, key):
+        # 更新修饰键状态
+        if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r or key == keyboard.Key.ctrl:
+            self.ctrl_pressed = True
+            return
+        if key == keyboard.Key.alt_l or key == keyboard.Key.alt_r or key == keyboard.Key.alt:
+            self.alt_pressed = True
+            return
+        if key == keyboard.Key.shift_l or key == keyboard.Key.shift_r or key == keyboard.Key.shift:
+            self.shift_pressed = True
+            return
+
+        # 检查目标键
+        if self._check_key_match(key):
+            self.target_key_pressed = True
+            self._check_hotkey()
+
+    def _on_release(self, key):
+        # 更新修饰键状态
+        if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r or key == keyboard.Key.ctrl:
+            self.ctrl_pressed = False
+        if key == keyboard.Key.alt_l or key == keyboard.Key.alt_r or key == keyboard.Key.alt:
+            self.alt_pressed = False
+        if key == keyboard.Key.shift_l or key == keyboard.Key.shift_r or key == keyboard.Key.shift:
+            self.shift_pressed = False
+
+        # 检查目标键释放
+        if self._check_key_match(key):
+            self.target_key_pressed = False
+
+    def _check_hotkey(self):
+        """检查热键组合是否满足"""
+        now = time.time()
+        if now - self.last_trigger < 0.3:
+            return
+
+        # 检查所有条件
+        ctrl_ok = (not self.need_ctrl) or self.ctrl_pressed
+        alt_ok = (not self.need_alt) or self.alt_pressed
+        shift_ok = (not self.need_shift) or self.shift_pressed
+        key_ok = self.target_key_pressed
+
+        if ctrl_ok and alt_ok and shift_ok and key_ok:
+            self.last_trigger = now
+            self.signals.debug.emit(f"Hotkey triggered: {self.hotkey_str}")
+            self.signals.pressed.emit('set_point')
+
     def stop(self):
-        if self.listener:
-            try:
-                self.listener.stop()
-            except:
-                pass
+        self.listener.stop()
 
 
 # ==================== Main Window ====================
@@ -388,13 +448,16 @@ class MainWindow(QMainWindow):
         self.config = load_config()
         self.history = []
 
-        # Hotkey
+        # 热键信号
         self.hk_signals = HotkeySignals()
         self.hk_signals.pressed.connect(self.on_hotkey)
         self.hk_signals.debug.connect(self.on_hotkey_debug)
-        self.hotkeys = Hotkeys(self.hk_signals, self.config.get("hotkey", "1"))
 
-        # Detector
+        # 初始化热键
+        hotkey_str = self.config.get("hotkey", "ctrl+1")
+        self.hotkeys = Hotkeys(self.hk_signals, hotkey_str)
+
+        # 检测器
         self.detector = DetectorThread(self.config)
         self.detector.status.connect(self.on_status)
         self.detector.result.connect(self.on_result)
@@ -404,85 +467,76 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
 
-        # Mouse timer
+        # 鼠标位置定时器
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_mouse)
         self.timer.start(50)
 
     def init_ui(self):
         self.setWindowTitle("Roulette Speed v6.3")
-        self.setFixedSize(400, 900)
+        self.setFixedSize(380, 880)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
 
         w = QWidget()
         self.setCentralWidget(w)
         layout = QVBoxLayout(w)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        # Title
-        title = QLabel("Roulette Speed Detector v6.3")
+        # 标题
+        title = QLabel("🎰 Roulette Speed Detector v6.3")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 15px; font-weight: bold; color: #2196F3;")
         layout.addWidget(title)
 
-        # Mouse info
+        # 管理员状态
+        admin_status = "✓ Admin" if is_admin() else "⚠ No Admin (hotkey may not work)"
+        admin_color = "#4CAF50" if is_admin() else "#ff9800"
+        admin_label = QLabel(admin_status)
+        admin_label.setAlignment(Qt.AlignCenter)
+        admin_label.setStyleSheet(f"font-size: 10px; color: {admin_color};")
+        layout.addWidget(admin_label)
+
+        # 鼠标信息
         info = QFrame()
         info.setStyleSheet("background: #e3f2fd; border-radius: 6px;")
         info_layout = QVBoxLayout(info)
         info_layout.setContentsMargins(8, 6, 8, 6)
-        info_layout.setSpacing(2)
+        info_layout.setSpacing(1)
 
         self.mouse_label = QLabel("Mouse: (0, 0)")
         self.mouse_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #1565c0;")
         info_layout.addWidget(self.mouse_label)
 
+        # 热键提示
+        hotkey_str = self.config.get("hotkey", "ctrl+1").upper()
+        hint = QLabel(f"Hotkey: {hotkey_str} to set detection point")
+        hint.setStyleSheet("font-size: 10px; color: #666;")
+        info_layout.addWidget(hint)
+
+        hint2 = QLabel("(Edit 'hotkey' in roulette_config.json to customize)")
+        hint2.setStyleSheet("font-size: 9px; color: #999;")
+        info_layout.addWidget(hint2)
+
         layout.addWidget(info)
 
-        # Detection Point Group
-        point_group = QGroupBox("Detection Point")
+        # 检测点
+        point_group = QGroupBox("📍 Detection Point")
         point_layout = QVBoxLayout()
-        point_layout.setSpacing(4)
+        point_layout.setSpacing(1)
 
         self.point_label = QLabel(f"({self.config['detect_point']['x']}, {self.config['detect_point']['y']})")
         self.point_label.setAlignment(Qt.AlignCenter)
         self.point_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #333;")
         point_layout.addWidget(self.point_label)
 
-        # Hotkey row
-        hotkey_row = QHBoxLayout()
-        hotkey_row.addWidget(QLabel("Hotkey: Ctrl +"))
-        self.hotkey_combo = QComboBox()
-        self.hotkey_combo.addItems(['1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
-                                    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'])
-        current_hotkey = self.config.get("hotkey", "1")
-        idx = self.hotkey_combo.findText(current_hotkey.upper())
-        if idx >= 0:
-            self.hotkey_combo.setCurrentIndex(idx)
-        self.hotkey_combo.currentTextChanged.connect(self.on_hotkey_change)
-        hotkey_row.addWidget(self.hotkey_combo)
-
-        # Set Point button (备用方案)
-        self.set_point_btn = QPushButton("Set Point Now")
-        self.set_point_btn.setStyleSheet("""
-            QPushButton {
-                background: #2196F3; color: white;
-                font-size: 12px; font-weight: bold;
-                padding: 8px; border-radius: 4px;
-            }
-            QPushButton:hover { background: #1976D2; }
-        """)
-        self.set_point_btn.clicked.connect(self.set_point_now)
-        hotkey_row.addWidget(self.set_point_btn)
-
-        point_layout.addLayout(hotkey_row)
         point_group.setLayout(point_layout)
         layout.addWidget(point_group)
 
-        # Parameters
-        param_group = QGroupBox("Parameters")
+        # 参数
+        param_group = QGroupBox("⚙️ Parameters")
         param_layout = QVBoxLayout()
-        param_layout.setSpacing(4)
+        param_layout.setSpacing(1)
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Sample Size (NxN):"))
@@ -532,8 +586,8 @@ class MainWindow(QMainWindow):
         param_group.setLayout(param_layout)
         layout.addWidget(param_group)
 
-        # Brightness graph
-        graph_group = QGroupBox("Brightness (green=current, red=avg, yellow=peak)")
+        # 亮度图表
+        graph_group = QGroupBox("📊 Brightness (green=current, red=avg, yellow=peak)")
         graph_layout = QVBoxLayout()
 
         self.graph = BrightnessGraph()
@@ -547,7 +601,7 @@ class MainWindow(QMainWindow):
         graph_group.setLayout(graph_layout)
         layout.addWidget(graph_group)
 
-        # Status
+        # 状态
         self.status_label = QLabel("Ready - Press START before wheel spins")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setFixedHeight(40)
@@ -558,8 +612,8 @@ class MainWindow(QMainWindow):
         """)
         layout.addWidget(self.status_label)
 
-        # Result
-        result_group = QGroupBox("Result")
+        # 结果
+        result_group = QGroupBox("🎯 Result")
         result_layout = QVBoxLayout()
 
         self.velocity_label = QLabel("-- deg/s")
@@ -579,8 +633,8 @@ class MainWindow(QMainWindow):
         result_group.setLayout(result_layout)
         layout.addWidget(result_group)
 
-        # History
-        history_group = QGroupBox("History (Last 6)")
+        # 历史
+        history_group = QGroupBox("📜 History (Last 6)")
         history_layout = QVBoxLayout()
 
         self.history_label = QLabel("No records")
@@ -596,19 +650,18 @@ class MainWindow(QMainWindow):
         history_group.setLayout(history_layout)
         layout.addWidget(history_group)
 
-        # Debug
-        self.debug_label = QLabel("Debug: Ready")
+        # 调试
+        self.debug_label = QLabel("Debug: waiting...")
         self.debug_label.setFixedHeight(40)
-        self.debug_label.setWordWrap(True)
         self.debug_label.setStyleSheet("""
             font-size: 9px; font-family: monospace;
-            background: #0a0a0a; color: #888;
+            background: #0a0a0a; color: #666;
             padding: 4px; border-radius: 4px;
         """)
         layout.addWidget(self.debug_label)
 
-        # START button
-        self.start_btn = QPushButton("START")
+        # 开始按钮
+        self.start_btn = QPushButton("▶ START")
         self.start_btn.setFixedHeight(50)
         self.start_btn.setStyleSheet("""
             QPushButton {
@@ -620,27 +673,6 @@ class MainWindow(QMainWindow):
         """)
         self.start_btn.clicked.connect(self.toggle)
         layout.addWidget(self.start_btn)
-
-    def set_point_now(self):
-        """按钮方式设置检测点"""
-        pos = QCursor.pos()
-        self.config["detect_point"]["x"] = pos.x()
-        self.config["detect_point"]["y"] = pos.y()
-        self.detector.config["detect_point"]["x"] = pos.x()
-        self.detector.config["detect_point"]["y"] = pos.y()
-        save_config(self.config)
-        self.point_label.setText(f"({pos.x()}, {pos.y()})")
-        self.status_label.setText(f"Point set: ({pos.x()}, {pos.y()})")
-        self.debug_label.setText(f"Detection point set via button: ({pos.x()}, {pos.y()})")
-
-    def on_hotkey_change(self, key):
-        self.config["hotkey"] = key
-        self.hotkeys.set_target_key(key)
-        save_config(self.config)
-
-    def on_hotkey_debug(self, msg):
-        self.debug_label.setText(f"Hotkey: {msg}")
-        print(f"[Hotkey] {msg}")
 
     def on_size_change(self, v):
         self.config["sample_size"] = v
@@ -680,7 +712,16 @@ class MainWindow(QMainWindow):
             self.detector.config["detect_point"]["y"] = pos.y()
             save_config(self.config)
             self.point_label.setText(f"({pos.x()}, {pos.y()})")
-            self.status_label.setText(f"Point set: ({pos.x()}, {pos.y()})")
+            self.status_label.setText(f"✓ Point set: ({pos.x()}, {pos.y()})")
+            self.status_label.setStyleSheet("""
+                font-size: 13px; font-weight: bold;
+                background: #2196F3; color: white;
+                border-radius: 6px;
+            """)
+
+    def on_hotkey_debug(self, msg):
+        self.debug_label.setText(f"Hotkey: {msg}")
+        print(f"[Hotkey] {msg}")
 
     def on_status(self, text):
         self.status_label.setText(text)
@@ -710,7 +751,7 @@ class MainWindow(QMainWindow):
         self.history = self.history[:6]
         self.history_label.setText("\n".join(self.history))
 
-        self.start_btn.setText("START")
+        self.start_btn.setText("▶ START")
         self.start_btn.setStyleSheet("""
             QPushButton {
                 background: #4CAF50; color: white;
@@ -732,7 +773,7 @@ class MainWindow(QMainWindow):
     def toggle(self):
         if not self.detector.measuring:
             self.detector.start_measure()
-            self.start_btn.setText("STOP")
+            self.start_btn.setText("■ STOP")
             self.start_btn.setStyleSheet("""
                 QPushButton {
                     background: #f44336; color: white;
@@ -743,7 +784,7 @@ class MainWindow(QMainWindow):
             """)
         else:
             self.detector.stop_measure()
-            self.start_btn.setText("START")
+            self.start_btn.setText("▶ START")
             self.start_btn.setStyleSheet("""
                 QPushButton {
                     background: #4CAF50; color: white;
@@ -760,14 +801,28 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    # Windows 管理员权限检查
+    if sys.platform == 'win32' and not is_admin():
+        reply = QMessageBox.question(
+            None,
+            "需要管理员权限",
+            "热键功能需要管理员权限才能正常工作。\n\n是否以管理员身份重新启动？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply == QMessageBox.Yes:
+            run_as_admin()
+            return
+        # 用户选择不提权，继续运行但热键可能不工作
+
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
 
     print("=" * 50)
-    print("  Roulette Speed Detector v6.3 - Windows")
+    print("  Roulette Speed Detector v6.3 - Windows Fixed")
     print("=" * 50)
-    print("  Default Hotkey: Ctrl+1")
-    print("  Or use 'Set Point Now' button")
+    print(f"  Admin: {is_admin()}")
+    print("  Hotkey: Ctrl+1 (customizable in config)")
     print("=" * 50)
 
     win = MainWindow()
