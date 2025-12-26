@@ -360,7 +360,7 @@ class MainWindow(QMainWindow):
         w = QWidget()
         self.setCentralWidget(w)
         layout = QVBoxLayout(w)
-        layout.setSpacing(6)
+        layout.setSpacing(2)
         layout.setContentsMargins(10, 10, 10, 10)
 
         title = QLabel("🎰 Roulette Speed Detector v6.2")
@@ -372,7 +372,7 @@ class MainWindow(QMainWindow):
         info.setStyleSheet("background: #e3f2fd; border-radius: 6px;")
         info_layout = QVBoxLayout(info)
         info_layout.setContentsMargins(8, 6, 8, 6)
-        info_layout.setSpacing(2)
+        info_layout.setSpacing(1)
 
         self.mouse_label = QLabel("Mouse: (0, 0)")
         self.mouse_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #1565c0;")
@@ -387,7 +387,7 @@ class MainWindow(QMainWindow):
 
         point_group = QGroupBox("📍 Detection Point")
         point_layout = QVBoxLayout()
-        point_layout.setSpacing(4)
+        point_layout.setSpacing(1)
 
         self.point_label = QLabel(f"({self.config['detect_point']['x']}, {self.config['detect_point']['y']})")
         self.point_label.setAlignment(Qt.AlignCenter)
@@ -399,7 +399,7 @@ class MainWindow(QMainWindow):
 
         param_group = QGroupBox("⚙️ Parameters")
         param_layout = QVBoxLayout()
-        param_layout.setSpacing(8)
+        param_layout.setSpacing(1)
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Sample Size (NxN):"))
